@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import requests
 
@@ -12,14 +13,25 @@ if not URLS:
     URLS = [f"https://www.district.in/movies/{CITY}-movie-tickets"]
 
 MOVIE_ID = "MV207332"  # Dune: Part Three on District
-BOOK_LINK = f"https://www.district.in/movies/dune-part-three-movie-tickets-in-{CITY}-MV207332"
+MOVIE_PAGE = f"https://www.district.in/movies/dune-part-three-movie-tickets-in-{CITY}-MV207332"
 API = f"https://api.telegram.org/bot{TOKEN}"
+
+# Matches show formats like "IMAX 2D", "IMAX 3D", "IMAX 70MM", "IMAX Laser"
+IMAX_PATTERN = re.compile(r"IMAX[\s\-]*(2D|3D|70\s?MM|LASER|WITH LASER)", re.IGNORECASE)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-IN,en;q=0.9",
+}
+
+RESULT_TEXT = {
+    "imax": "🎬 IMAX booking OPEN",
+    "no_imax": "🟡 Booking open, but no IMAX shows yet",
+    "closed": "🔍 Not open yet",
+    "blocked": "⚠️ Blocked by District",
+    "error": "❌ Connection error",
 }
 
 
@@ -30,6 +42,50 @@ def send(msg):
         print("Telegram:", "sent" if r.ok else f"FAILED {r.status_code} {r.text[:200]}")
     except Exception as e:
         print("Telegram ERROR:", e)
+
+
+def fetch(url):
+    """Returns (status, html_or_detail). status is 'ok', 'blocked' or 'error'."""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+    except Exception as e:
+        print(f"ERROR fetching {url}: {e}")
+        return "error", str(e)[:150]
+    if r.status_code != 200:
+        print(f"BLOCKED: {url} -> HTTP {r.status_code}")
+        return "blocked", f"HTTP {r.status_code}"
+    print(f"OK: {url} -> HTTP 200, {len(r.text)} chars")
+    return "ok", r.text
+
+
+def check_district():
+    """Returns (result, detail). result: imax, no_imax, closed, blocked, error."""
+    # Step 1: is Dune in the city's bookable list?
+    booking_open = False
+    last_status, last_detail = "error", ""
+    for url in URLS:
+        status, data = fetch(url)
+        if status != "ok":
+            last_status, last_detail = status, data
+            continue
+        booking_open = MOVIE_ID in data
+        last_status = "ok"
+        break
+
+    if last_status != "ok":
+        return last_status, last_detail
+    if not booking_open:
+        return "closed", ""
+
+    # Step 2: does the city's Dune page have IMAX shows?
+    status, data = fetch(MOVIE_PAGE)
+    if status != "ok":
+        return status, data
+    formats = sorted({m.group(0).upper() for m in IMAX_PATTERN.finditer(data)})
+    if formats:
+        print("IMAX formats found:", ", ".join(formats))
+        return "imax", ", ".join(formats)
+    return "no_imax", ""
 
 
 def status_asked():
@@ -50,34 +106,18 @@ def status_asked():
     return False
 
 
-def check_district():
-    """Returns (result, detail). result is 'open', 'closed', 'blocked' or 'error'."""
-    result, detail = "error", ""
-    for url in URLS:
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
-        except Exception as e:
-            print(f"ERROR fetching {url}: {e}")
-            result, detail = "error", str(e)[:150]
-            continue
-        if r.status_code != 200:
-            print(f"BLOCKED: {url} -> HTTP {r.status_code}")
-            result, detail = "blocked", f"HTTP {r.status_code}"
-            continue
-        print(f"OK: {url} -> HTTP 200, {len(r.text)} chars")
-        return ("open" if MOVIE_ID in r.text else "closed"), ""
-    return result, detail
-
-
 def main():
     if os.environ.get("TEST_MODE") == "true":
-        send(f"✅ Dune checker is set up! Watching: {CITY.title()}")
+        send(f"✅ Dune IMAX checker is set up! Watching: {CITY.title()}")
         return
 
     result, detail = check_district()
 
-    if result == "open":
-        send(f"🎬 Dune: Part Three booking is OPEN in {CITY.title()}!\n{BOOK_LINK}")
+    if result == "imax":
+        send(f"🎬 Dune: Part Three IMAX booking is OPEN in {CITY.title()}!\n"
+             f"Formats: {detail}\n{MOVIE_PAGE}")
+    elif result == "no_imax":
+        print("Booking open, but no IMAX shows yet.")
     elif result == "closed":
         print("Not open yet.")
     elif result == "blocked":
@@ -89,10 +129,10 @@ def main():
 
     if status_asked():
         now = time.strftime("%d-%m %H:%M")
-        text = {"open": "🎬 Booking OPEN", "closed": "🔍 Not open yet",
-                "blocked": "⚠️ Blocked by District", "error": "❌ Connection error"}[result]
-        send(f"✅ Checker is running\nCity: {CITY.title()}\nChecked: {now}\nResult: {text}")
+        send(f"✅ Checker is running\nCity: {CITY.title()}\nChecked: {now}\n"
+             f"Result: {RESULT_TEXT[result]}")
 
 
 if __name__ == "__main__":
     main()
+
