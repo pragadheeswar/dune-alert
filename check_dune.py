@@ -1,8 +1,9 @@
 import os
+import time
 import requests
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
 CITY = os.environ.get("CITY", "chennai").strip().lower()
 
 # Optional override (used by the GitHub workflow); otherwise built from CITY
@@ -12,6 +13,7 @@ if not URLS:
 
 MOVIE_ID = "MV207332"  # Dune: Part Three on District
 BOOK_LINK = f"https://www.district.in/movies/dune-part-three-movie-tickets-in-{CITY}-MV207332"
+API = f"https://api.telegram.org/bot{TOKEN}"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -23,14 +25,29 @@ HEADERS = {
 
 def send(msg):
     try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg},
-            timeout=20,
-        )
+        r = requests.post(f"{API}/sendMessage",
+                          data={"chat_id": CHAT_ID, "text": msg}, timeout=20)
         print("Telegram:", "sent" if r.ok else f"FAILED {r.status_code} {r.text[:200]}")
     except Exception as e:
         print("Telegram ERROR:", e)
+
+
+def status_asked():
+    """True if you sent /status since the last check. Marks messages as read."""
+    try:
+        updates = requests.get(f"{API}/getUpdates", timeout=20).json().get("result", [])
+        if updates:
+            requests.get(f"{API}/getUpdates",
+                         params={"offset": updates[-1]["update_id"] + 1}, timeout=20)
+    except Exception as e:
+        print("getUpdates error:", e)
+        return False
+    for upd in updates:
+        msg = upd.get("message") or {}
+        text = (msg.get("text") or "").strip().lower().lstrip("/")
+        if str(msg.get("chat", {}).get("id")) == CHAT_ID and text == "status":
+            return True
+    return False
 
 
 def check_district():
@@ -69,6 +86,12 @@ def main():
     else:
         print("Could not check: connection error.")
         send(f"❌ Could not reach District ({CITY.title()}): {detail}")
+
+    if status_asked():
+        now = time.strftime("%d-%m %H:%M")
+        text = {"open": "🎬 Booking OPEN", "closed": "🔍 Not open yet",
+                "blocked": "⚠️ Blocked by District", "error": "❌ Connection error"}[result]
+        send(f"✅ Checker is running\nCity: {CITY.title()}\nChecked: {now}\nResult: {text}")
 
 
 if __name__ == "__main__":
