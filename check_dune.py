@@ -1,6 +1,4 @@
 import os
-import time
-import pathlib
 import requests
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -9,9 +7,7 @@ URLS = [u.strip() for u in os.environ.get("CHECK_URLS", "").split(",") if u.stri
 
 MOVIE_ID = "MV207332"  # Dune: Part Three on District
 BOOK_LINK = "https://www.district.in/movies/dune-part-three-movie-tickets-in-chennai-MV207332"
-
-ALERT_FLAG = pathlib.Path("alerting.flag")
-STOP_FLAG = pathlib.Path("stopped.flag")
+WORKFLOW_FILE = "dune-check.yml"
 API = f"https://api.telegram.org/bot{TOKEN}"
 
 HEADERS = {
@@ -26,19 +22,23 @@ def send(msg):
     print("Telegram:", r.status_code, r.text[:200])
 
 
-def stop_requested(since):
-    """True if you sent 'stop' to the bot after alerting started."""
+def read_and_clear_messages():
+    """Get new messages sent to the bot, then mark them as read."""
     try:
-        data = requests.get(f"{API}/getUpdates", timeout=20).json()
+        updates = requests.get(f"{API}/getUpdates", timeout=20).json().get("result", [])
+        if updates:
+            requests.get(f"{API}/getUpdates",
+                         params={"offset": updates[-1]["update_id"] + 1}, timeout=20)
+        return [u.get("message") or {} for u in updates]
     except Exception as e:
         print("getUpdates error:", e)
-        return False
-    for upd in data.get("result", []):
-        msg = upd.get("message") or {}
-        text = (msg.get("text") or "").strip().lower().lstrip("/")
-        if (str(msg.get("chat", {}).get("id")) == CHAT_ID
-                and msg.get("date", 0) >= since
-                and text == "stop"):
+        return []
+
+
+def user_said_stop(messages):
+    for m in messages:
+        text = (m.get("text") or "").strip().lower().lstrip("/")
+        if str(m.get("chat", {}).get("id")) == CHAT_ID and text == "stop":
             return True
     return False
 
@@ -52,8 +52,19 @@ def booking_open():
             continue
         print(f"{url} -> HTTP {r.status_code}, {len(r.text)} chars")
         if r.status_code == 200 and MOVIE_ID in r.text:
-            return url
-    return None
+            return True
+    return False
+
+
+def disable_workflow():
+    repo = os.environ["GITHUB_REPOSITORY"]
+    r = requests.put(
+        f"https://api.github.com/repos/{repo}/actions/workflows/{WORKFLOW_FILE}/disable",
+        headers={"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                 "Accept": "application/vnd.github+json"},
+        timeout=20,
+    )
+    print("Disable workflow:", r.status_code)
 
 
 def main():
@@ -61,28 +72,19 @@ def main():
         send("✅ Test message: your Dune checker bot is working!")
         return
 
-    if STOP_FLAG.exists():
-        print("Stopped by user. Delete stopped.flag and alerting.flag to re-arm.")
-        return
+    messages = read_and_clear_messages()
 
-    if ALERT_FLAG.exists():
-        since = int(ALERT_FLAG.read_text().split()[0])
-        if stop_requested(since):
-            STOP_FLAG.write_text(str(int(time.time())))
-            send("🛑 OK, alerts stopped. Enjoy Dune: Part Three! 🍿")
-        else:
-            send(f"🔔 Reminder: Dune: Part Three booking is OPEN in Chennai!\n"
-                 f"{BOOK_LINK}\n\nReply 'stop' to stop these alerts.")
-        return
-
-    url = booking_open()
-    if url:
-        ALERT_FLAG.write_text(f"{int(time.time())} {url}")
-        send(f"🎬 Dune: Part Three booking just OPENED in Chennai!\n"
-             f"{BOOK_LINK}\n\nI'll keep reminding you every ~10 min. "
-             f"Reply 'stop' to stop.")
-    else:
+    if not booking_open():
         print("Not available yet.")
+        return
+
+    if user_said_stop(messages):
+        send("🛑 OK, alerts stopped and the checker is switched off. Enjoy Dune! 🍿")
+        disable_workflow()
+        return
+
+    send(f"🎬 Dune: Part Three booking is OPEN in Chennai!\n{BOOK_LINK}\n\n"
+         f"I'll remind you every ~10 min. Reply 'stop' to stop.")
 
 
 if __name__ == "__main__":
