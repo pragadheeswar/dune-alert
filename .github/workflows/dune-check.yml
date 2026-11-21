@@ -1,8 +1,6 @@
 name: Dune Part 3 Booking Checker
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       test:
@@ -12,11 +10,15 @@ on:
 
 permissions:
   contents: read
-  actions: write
+
+concurrency:
+  group: dune-checker
+  cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
@@ -33,4 +35,3 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CHECK_URLS: ${{ vars.CHECK_URLS }}
           TEST_MODE: ${{ inputs.test }}
-          GITHUB_TOKEN: ${{ github.token }}
