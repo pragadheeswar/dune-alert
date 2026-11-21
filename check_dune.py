@@ -22,28 +22,34 @@ HEADERS = {
 
 
 def send(msg):
-    r = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": msg},
-        timeout=20,
-    )
-    print("Telegram:", "sent" if r.ok else f"FAILED {r.status_code} {r.text[:200]}")
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=20,
+        )
+        print("Telegram:", "sent" if r.ok else f"FAILED {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print("Telegram ERROR:", e)
 
 
-def booking_open():
+def check_district():
+    """Returns (result, detail). result is 'open', 'closed', 'blocked' or 'error'."""
+    result, detail = "error", ""
     for url in URLS:
         try:
             r = requests.get(url, headers=HEADERS, timeout=30)
         except Exception as e:
             print(f"ERROR fetching {url}: {e}")
+            result, detail = "error", str(e)[:150]
             continue
         if r.status_code != 200:
             print(f"BLOCKED: {url} -> HTTP {r.status_code}")
+            result, detail = "blocked", f"HTTP {r.status_code}"
             continue
         print(f"OK: {url} -> HTTP 200, {len(r.text)} chars")
-        if MOVIE_ID in r.text:
-            return True
-    return False
+        return ("open" if MOVIE_ID in r.text else "closed"), ""
+    return result, detail
 
 
 def main():
@@ -51,10 +57,18 @@ def main():
         send(f"✅ Dune checker is set up! Watching: {CITY.title()}")
         return
 
-    if booking_open():
+    result, detail = check_district()
+
+    if result == "open":
         send(f"🎬 Dune: Part Three booking is OPEN in {CITY.title()}!\n{BOOK_LINK}")
-    else:
+    elif result == "closed":
         print("Not open yet.")
+    elif result == "blocked":
+        print("Could not check: District blocked the request.")
+        send(f"⚠️ District blocked the check ({CITY.title()}, {detail}). Will retry next time.")
+    else:
+        print("Could not check: connection error.")
+        send(f"❌ Could not reach District ({CITY.title()}): {detail}")
 
 
 if __name__ == "__main__":
