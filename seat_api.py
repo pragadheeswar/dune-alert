@@ -3,7 +3,6 @@ import re
 import json
 import time
 import pathlib
-from datetime import datetime
 import requests
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -14,6 +13,7 @@ TG = f"https://api.telegram.org/bot{TOKEN}"
 WATCH_ROWS = ["A", "B", "C", "D", "E", "F", "G"]   # alert if any seat opens in these rows
 MIN_SEATS = 1                                       # seats needed in one row to alert
 
+# Seat checks (need guest token)
 SHOWS = [
     {
         "label": "PVR Palazzo, Nexus Vijaya Mall (IMAX 2D)",
@@ -49,12 +49,17 @@ SHOWS = [
     },
 ]
 
-# Alert when this theater has Dune shows on this date (no token needed)
-DATE_CHECK = {
-    "theatre": "Palazzo",      # part of the theater name
-    "date": "2026-12-19",      # YYYY-MM-DD
-    "format": "",              # "" = any format, or e.g. "IMAX"
-}
+# Showtime checks (public page, no token): alert when a theater gets shows
+SHOWTIME_CHECKS = [
+    {
+        "label": "Avengers: Doomsday – Seven Screen's – 20 Dec – English",
+        "url": ("https://www.district.in/movies/avengers-doomsday-movie-tickets-in-chennai-MV176735"
+                "?frmtid=Mm5dpqTqJz&fromdate=2026-12-20"),
+        "theatre": "Seven Screen",   # part of the theater name
+        "date": "2026-12-20",        # YYYY-MM-DD
+        "lang": "English",           # "" = any language
+    },
+]
 # =========================
 
 HERE = pathlib.Path(__file__).parent
@@ -125,73 +130,66 @@ def make_session():
     return s
 
 
-# ---------- Date check (public page, no token) ----------
+# ---------- Showtime checks (public page, no token) ----------
 
-def find_shows(html):
-    """All shows (ScreeningEvent) from the page's structured data."""
-    shows = []
-    blocks = re.findall(r'<script[^>]*application/ld\+json[^>]*>(.*?)</script>', html, re.S)
-    for block in blocks:
-        try:
-            data = json.loads(block)
-        except Exception:
-            continue
-        stack = [data]
-        while stack:
-            item = stack.pop()
-            if isinstance(item, dict):
-                if item.get("@type") == "ScreeningEvent":
-                    loc = item.get("location") or {}
-                    shows.append({
-                        "name": item.get("name", ""),
-                        "start": item.get("startDate", ""),
-                        "theatre": loc.get("name", "") if isinstance(loc, dict) else "",
-                    })
-                stack.extend(item.values())
-            elif isinstance(item, list):
-                stack.extend(item)
-    return shows
-
-
-def check_date(s):
+def check_showtimes(s, chk):
     """Returns (status_text, alert_text_or_None)."""
-    theatre, date, fmt = DATE_CHECK["theatre"], DATE_CHECK["date"], DATE_CHECK["format"]
-    title = f"{theatre} on {date}" + (f" ({fmt})" if fmt else "")
-    url = f"{MOVIE_PAGE}?fromdate={date}"
+    label = chk["label"]
     try:
-        r = s.get(url, timeout=30)
+        r = s.get(chk["url"], timeout=30)
     except Exception:
-        return f"{title}: ❌ connection error", None
+        return f"{label}: ❌ connection error", None
     if r.status_code != 200:
-        return f"{title}: ⚠️ HTTP {r.status_code}", None
+        return f"{label}: ⚠️ HTTP {r.status_code}", None
 
-    found = []
-    for show in find_shows(r.text):
-        if theatre.lower() not in show["theatre"].lower():
-            continue
-        if not show["start"].startswith(date):
-            continue
-        if fmt and fmt.lower() not in show["name"].lower():
-            continue
-        found.append(show)
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S)
+    if not m:
+        return f"{label}: ❌ page data not found", None
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return f"{label}: ❌ unreadable page data", None
+
+    # Find every theater (cinemaInfo + sessions) anywhere in the page data
+    found, seen = [], set()
+    stack = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            info = item.get("cinemaInfo")
+            sessions = item.get("sessions")
+            if isinstance(info, dict) and isinstance(sessions, list):
+                name = info.get("name", "")
+                if chk["theatre"].lower() in name.lower():
+                    for sess in sessions:
+                        if not isinstance(sess, dict):
+                            continue
+                        if sess.get("showDate", str(sess.get("showTime", ""))[:10]) != chk["date"]:
+                            continue
+                        if chk["lang"] and chk["lang"].lower() != str(sess.get("lang", "")).lower():
+                            continue
+                        key = (name, sess.get("sid"))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        found.append((name, sess))
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
 
     if not found:
-        print(f"{title}: no shows yet")
-        return f"{title}: 🔍 no shows yet", None
+        print(f"{label}: no shows yet")
+        return f"{label}: 🔍 no shows yet", None
 
-    found.sort(key=lambda x: x["start"])
-    lines = []
-    for show in found:
-        try:
-            when = datetime.fromisoformat(show["start"]).strftime("%I:%M %p")
-        except Exception:
-            when = show["start"]
-        m = re.search(r"\(([^)]*)\)\s*$", show["name"])
-        lines.append(f"• {when} – {m.group(1) if m else 'show'}")
+    found.sort(key=lambda x: x[1].get("showTimeISO", ""))
+    theatre_name = found[0][0]
+    lines = [f"• {sess.get('showTimeText', '?')} – {sess.get('scrnFmt', '')} "
+             f"({sess.get('avail', '?')}/{sess.get('total', '?')} seats free)"
+             for _, sess in found]
     detail = "\n".join(lines)
-    print(f"{title}: {len(found)} shows\n{detail}")
-    alert = (f"📅 Booking OPEN: {found[0]['theatre']} on {date}!\n{detail}\n\nBook: {url}")
-    return f"{title}: ✅ {len(found)} shows open", alert
+    print(f"{label}: {len(found)} shows\n{detail}")
+    alert = f"📅 Shows OPEN!\n{label}\n{theatre_name}\n{detail}\n\nBook: {chk['url']}"
+    return f"{label}: ✅ {len(found)} shows open", alert
 
 
 # ---------- Seat checks (need guest token) ----------
@@ -283,11 +281,12 @@ def main():
 
     status_parts, errors = [], []
 
-    # 1) Date check: PVR Palazzo on 19 Dec
-    date_status, date_alert = check_date(s)
-    status_parts.append(date_status)
-    if date_alert:
-        send(date_alert)
+    # 1) Showtime checks (no token)
+    for chk in SHOWTIME_CHECKS:
+        status_text, alert = check_showtimes(s, chk)
+        status_parts.append(status_text)
+        if alert:
+            send(alert)
 
     # 2) Seat checks: rows A–G at both theaters
     for show in SHOWS:
