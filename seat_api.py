@@ -11,7 +11,7 @@ CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
 TG = f"https://api.telegram.org/bot{TOKEN}"
 
 # ===== Your settings =====
-WATCH_ROWS = ["A", "B", "C", "D", "E", "F", "G"]   # alert if any seat opens in these rows
+WATCH_ROWS = ["A", "B", "C", "D", "E", "F", "G" , "Q"]   # alert if any seat opens in these rows
 MIN_SEATS = 1                                       # seats needed in one row to alert
 
 SHOWS = [
