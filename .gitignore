@@ -1,2 +1,9 @@
 config.env
 log.txt
+block_state.json
+last_check.json
+seat_link.txt
+rows.txt
+rows.json
+show.json
+guest_token.txt
