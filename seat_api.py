@@ -10,10 +10,10 @@ CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
 TG = f"https://api.telegram.org/bot{TOKEN}"
 
 # ===== Your settings =====
-WATCH_ROWS = ["A", "B", "C", "D", "E", "F", "G"]   # alert if any seat opens in these rows
-MIN_SEATS = 1                                       # seats needed in one row to alert
+DEFAULT_ROWS = ["A", "B", "C", "D", "E", "F", "G"]  # used unless changed with /rows
+MIN_SEATS = 1                                        # seats needed in one row to alert
 
-# Seat checks (need guest token)
+# Seat checks (need guest token). Theater number = position in this list (1, 2, ...)
 SHOWS = [
     {
         "label": "PVR Palazzo, Nexus Vijaya Mall (IMAX 2D)",
@@ -52,18 +52,27 @@ SHOWS = [
 # Showtime checks (public page, no token): alert when a theater gets shows
 SHOWTIME_CHECKS = [
     {
+        "label": "Avengers: Doomsday – Seven Screen's – 19 Dec – English",
+        "url": ("https://www.district.in/movies/avengers-doomsday-movie-tickets-in-chennai-MV176735"
+                "?frmtid=Mm5dpqTqJz&fromdate=2026-12-19"),
+        "theatre": "Seven Screen",
+        "date": "2026-12-19",
+        "lang": "English",
+    },
+    {
         "label": "Avengers: Doomsday – Seven Screen's – 20 Dec – English",
         "url": ("https://www.district.in/movies/avengers-doomsday-movie-tickets-in-chennai-MV176735"
                 "?frmtid=Mm5dpqTqJz&fromdate=2026-12-20"),
-        "theatre": "Seven Screen",   # part of the theater name
-        "date": "2026-12-20",        # YYYY-MM-DD
-        "lang": "English",           # "" = any language
+        "theatre": "Seven Screen",
+        "date": "2026-12-20",
+        "lang": "English",
     },
 ]
 # =========================
 
 HERE = pathlib.Path(__file__).parent
 GUEST_FILE = HERE / "guest_token.txt"   # saved by /token (only if District asks)
+ROWS_FILE = HERE / "rows.json"          # saved by /rows
 
 SEAT_API = ("https://www.district.in/gw/consumer/movies/v1/select-seat"
             "?version=3&site_id=1&channel=mweb&child_site_id=1&platform=district")
@@ -87,8 +96,68 @@ def get_guest_token():
     return os.environ.get("GUEST_TOKEN", "").strip()
 
 
+# ---------- Rows per theater (by number) ----------
+
+def load_saved_rows():
+    try:
+        return json.loads(ROWS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def rows_for(num):
+    return load_saved_rows().get(str(num)) or DEFAULT_ROWS
+
+
+def parse_rows(text):
+    """'A-G' / 'A,B,C' / 'A-C,H' -> ['A','B','C',...]. Returns None if invalid."""
+    rows = []
+    for part in text.replace(" ", "").upper().split(","):
+        if not part:
+            continue
+        m = re.fullmatch(r"([A-Z])-([A-Z])", part)
+        if m:
+            a, b = ord(m.group(1)), ord(m.group(2))
+            if a > b:
+                a, b = b, a
+            rows += [chr(c) for c in range(a, b + 1)]
+        elif re.fullmatch(r"[A-Z]{1,2}", part):
+            rows.append(part)
+        else:
+            return None
+    return list(dict.fromkeys(rows)) or None   # remove duplicates, keep order
+
+
+def handle_rows_command(arg):
+    usage = f"Send: /rows NUMBER ROWS  (e.g. /rows 1 A-G)\nTheaters: 1 to {len(SHOWS)}"
+    parts = arg.split(maxsplit=1)
+    if len(parts) < 2 or not parts[0].isdigit() or not 1 <= int(parts[0]) <= len(SHOWS):
+        send("❌ " + usage)
+        return
+
+    num = int(parts[0])
+    label = SHOWS[num - 1]["label"]
+    saved = load_saved_rows()
+
+    if parts[1].strip().lower() == "default":
+        saved.pop(str(num), None)
+        ROWS_FILE.write_text(json.dumps(saved))
+        send(f"✅ Theater {num}: {label}\nBack to default rows: {', '.join(DEFAULT_ROWS)}")
+        return
+
+    rows = parse_rows(parts[1])
+    if not rows:
+        send("❌ Couldn't read those rows. Examples: A-G  or  A,B,C  or  A-C,H")
+        return
+    saved[str(num)] = rows
+    ROWS_FILE.write_text(json.dumps(saved))
+    send(f"✅ Theater {num}: {label}\nNow watching rows: {', '.join(rows)}")
+
+
+# ---------- Telegram commands ----------
+
 def read_commands():
-    """Handles /token. Returns True if /status was asked. Marks messages as read."""
+    """Handles /token and /rows. Returns True if /status was asked."""
     try:
         updates = requests.get(f"{TG}/getUpdates", timeout=20).json().get("result", [])
         if updates:
@@ -107,6 +176,8 @@ def read_commands():
         cmd, arg = cmd.lower().lstrip("/"), arg.strip()
         if cmd == "status":
             status = True
+        elif cmd == "rows":
+            handle_rows_command(arg)
         elif cmd == "token":
             if arg:
                 GUEST_FILE.write_text(arg)
@@ -150,7 +221,6 @@ def check_showtimes(s, chk):
     except Exception:
         return f"{label}: ❌ unreadable page data", None
 
-    # Find every theater (cinemaInfo + sessions) anywhere in the page data
     found, seen = [], set()
     stack = [data]
     while stack:
@@ -234,38 +304,41 @@ def book_link(body):
     return MOVIE_PAGE
 
 
-def check_show(s, show):
+def check_show(s, num, show):
     """Returns (status_text, alert_text_or_None, error_code_or_None)."""
     label, body = show["label"], show["body"]
+    watch = rows_for(num)
+    title = f"{num}. {label}\n   Watching rows: {', '.join(watch)}"
     try:
         r = fetch_layout(s, body)
     except Exception:
-        return f"{label}: ❌ connection error", None, "error"
+        return f"{title}\n   ❌ connection error", None, "error"
 
     if r.status_code == 401:
-        return f"{label}: 🔑 needs guest token", None, "401"
+        return f"{title}\n   🔑 needs guest token", None, "401"
     if r.status_code != 200:
         print(f"{label}: HTTP {r.status_code} {r.text[:150]}")
-        return f"{label}: ⚠️ HTTP {r.status_code}", None, "http"
+        return f"{title}\n   ⚠️ HTTP {r.status_code}", None, "http"
 
     try:
         rows, name, when = parse(r.json(), body, label)
     except Exception:
-        return f"{label}: ❌ unexpected data", None, "data"
+        return f"{title}\n   ❌ unexpected data", None, "data"
 
     lines, found = [], {}
-    for row in WATCH_ROWS:
+    for row in watch:
         info = rows.get(row)
         if not info:
-            lines.append(f"  Row {row}: not on seat map")
+            lines.append(f"   Row {row}: not on seat map")
             continue
         avail = info["available"]
-        lines.append(f"  Row {row}: {len(avail)} available")
+        lines.append(f"   Row {row}: {len(avail)} available")
         if len(avail) >= MIN_SEATS:
             found[row] = avail
 
     header = f"{name}" + (f" | {when}" if when else "")
-    status_text = header + "\n" + "\n".join(lines)
+    status_text = (f"{num}. {header}\n   Watching rows: {', '.join(watch)}\n"
+                   + "\n".join(lines))
     print(status_text)
 
     alert = None
@@ -276,7 +349,7 @@ def check_show(s, show):
 
 
 def main():
-    status = read_commands()
+    status = read_commands()   # applies /rows and /token before checking
     s = make_session()
 
     status_parts, errors = [], []
@@ -288,9 +361,9 @@ def main():
         if alert:
             send(alert)
 
-    # 2) Seat checks: rows A–G at both theaters
-    for show in SHOWS:
-        status_text, alert, err = check_show(s, show)
+    # 2) Seat checks: each theater with its own rows
+    for num, show in enumerate(SHOWS, 1):
+        status_text, alert, err = check_show(s, num, show)
         status_parts.append(status_text)
         if alert:
             send(alert)
