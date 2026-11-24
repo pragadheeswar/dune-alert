@@ -305,25 +305,41 @@ def book_link(body):
 
 
 def check_show(s, num, show):
-    """Returns (status_text, alert_text_or_None, error_code_or_None)."""
+    """Returns (status_text, alert_text_or_None, problem_or_None).
+    problem is only set for things you should be told about:
+    'token' (401), 'connection', 'blocked' (403)."""
     label, body = show["label"], show["body"]
     watch = rows_for(num)
     title = f"{num}. {label}\n   Watching rows: {', '.join(watch)}"
+
     try:
         r = fetch_layout(s, body)
-    except Exception:
-        return f"{title}\n   ❌ connection error", None, "error"
+    except Exception as e:
+        print(f"{label}: connection error: {e}")
+        return f"{title}\n   ❌ connection error", None, "connection"
 
     if r.status_code == 401:
-        return f"{title}\n   🔑 needs guest token", None, "401"
+        return f"{title}\n   🔑 needs guest token", None, "token"
+    if r.status_code == 403:
+        print(f"{label}: HTTP 403 blocked")
+        return f"{title}\n   🚫 blocked by District (403)", None, "blocked"
+
     if r.status_code != 200:
-        print(f"{label}: HTTP {r.status_code} {r.text[:150]}")
-        return f"{title}\n   ⚠️ HTTP {r.status_code}", None, "http"
+        # Sold out / closed / not available (e.g. 412 NO_SEATS_PROV): skip quietly
+        reason = f"HTTP {r.status_code}"
+        try:
+            j = r.json()
+            reason = j.get("mCode") or j.get("error") or reason
+        except Exception:
+            pass
+        print(f"{label}: not available ({reason}) – skipped")
+        return f"{title}\n   ⏸️ not available ({reason}) – skipped", None, None
 
     try:
         rows, name, when = parse(r.json(), body, label)
     except Exception:
-        return f"{title}\n   ❌ unexpected data", None, "data"
+        print(f"{label}: no seat map in reply – skipped")
+        return f"{title}\n   ⏸️ no seat map in reply – skipped", None, None
 
     lines, found = [], {}
     for row in watch:
@@ -352,7 +368,7 @@ def main():
     status = read_commands()   # applies /rows and /token before checking
     s = make_session()
 
-    status_parts, errors = [], []
+    status_parts, problems = [], []
 
     # 1) Showtime checks (no token)
     for chk in SHOWTIME_CHECKS:
@@ -363,19 +379,24 @@ def main():
 
     # 2) Seat checks: each theater with its own rows
     for num, show in enumerate(SHOWS, 1):
-        status_text, alert, err = check_show(s, num, show)
+        status_text, alert, problem = check_show(s, num, show)
         status_parts.append(status_text)
         if alert:
             send(alert)
-        if err:
-            errors.append((show["label"], err))
+        if problem:
+            problems.append((num, problem))
 
-    if any(err == "401" for _, err in errors):
+    # Notify only for token / connection / blocked problems
+    if any(p == "token" for _, p in problems):
         send("🔑 District needs a guest token. Send: /token VALUE\n"
              "(PC Chrome → F12 → Application → Cookies → www.district.in → x-guest-token)")
-    for label, err in errors:
-        if err in ("http", "error", "data"):
-            send(f"⚠️ Seat check failed for {label} ({err}). Will retry next time.")
+    conn = [str(n) for n, p in problems if p == "connection"]
+    if conn:
+        send(f"⚠️ Connection error for theater {', '.join(conn)}. Will retry next time.")
+    blocked = [str(n) for n, p in problems if p == "blocked"]
+    if blocked:
+        send(f"🚫 District blocked the check for theater {', '.join(blocked)} (403). "
+             f"Will retry next time.")
 
     if status:
         send(f"✅ Seat checker is running ({time.strftime('%d-%m %H:%M')})\n\n"
